@@ -1,4 +1,6 @@
 from collections import defaultdict
+from ast import literal_eval
+from functools import partial
 
 from distributed import SchedulerPlugin
 from dask.core import reverse_dict
@@ -39,6 +41,26 @@ def get_node_depths(dependencies, root_nodes, metrics):
     return node_depths
 
 
+def vertical_partition(part_nodes, dependencies):
+
+    layers = defaultdict(set)
+
+    for pn in part_nodes:
+        layer_name = literal_eval(pn)[0]
+        layers[layer_name] |= {pn}
+
+    layer_deps = {}
+
+    _unravel_deps = partial(unravel_deps, dependencies, unravelled_deps=None)
+
+    for name, keys in layers.items():
+        layer_deps[name] = set().union(*map(_unravel_deps, keys))
+
+    import pdb; pdb.set_trace()
+
+    return
+
+
 class AutoRestrictor(SchedulerPlugin):
 
     def update_graph(self, scheduler, dsk=None, keys=None, restrictions=None,
@@ -60,6 +82,8 @@ class AutoRestrictor(SchedulerPlugin):
         # Horizontal partition nodes are initialized as the terminal nodes.
         part_nodes = {k for (k, v) in dependents.items() if not v}
         root_nodes = {k for (k, v) in dependencies.items() if not v}
+
+        vertical_partition(part_nodes, root_nodes, dependencies)
 
         # Figure out the depth of every task. Depth is defined as maximum
         # distance from a root node. TODO: Optimize get_node_depths.
