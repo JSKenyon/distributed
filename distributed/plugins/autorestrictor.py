@@ -1,6 +1,7 @@
 from collections import defaultdict
 from ast import literal_eval
 from functools import partial
+from itertools import combinations, permutations
 
 from distributed import SchedulerPlugin
 from dask.core import reverse_dict
@@ -25,6 +26,19 @@ def unravel_deps(hlg_deps, name, unravelled_deps=None):
     return unravelled_deps
 
 
+def get_node_deps(dependencies, node, node_deps=None):
+    """Recursively construct a set of all dependencies for a specific task."""
+
+    if node_deps is None:
+        node_deps = set()
+
+    for dep in dependencies[node]:
+        node_deps |= {dep}
+        get_node_deps(dependencies, dep, node_deps)
+
+    return node_deps
+
+
 def get_node_depths(dependencies, root_nodes, metrics):
 
     node_depths = {}
@@ -41,24 +55,40 @@ def get_node_depths(dependencies, root_nodes, metrics):
     return node_depths
 
 
-def vertical_partition(part_nodes, dependencies):
+def vertical_partition(dependencies):
 
-    layers = defaultdict(set)
+    dependents = reverse_dict(dependencies)
 
-    for pn in part_nodes:
-        layer_name = literal_eval(pn)[0]
-        layers[layer_name] |= {pn}
+    terminal_nodes = {k for (k, v) in dependents.items() if not v}
+    root_nodes = {k for (k, v) in dependencies.items() if not v}
 
-    layer_deps = {}
+    tnd = term_node_deps = {}
+    tnr = term_node_roots = {}
 
-    _unravel_deps = partial(unravel_deps, dependencies, unravelled_deps=None)
+    for tn in terminal_nodes:
+        tnd[tn] = get_node_deps(dependencies, tn)
+        tnr[tn] = tnd[tn] & root_nodes
 
-    for name, keys in layers.items():
-        layer_deps[name] = set().union(*map(_unravel_deps, keys))
+    share_roots = {tn: set() for tn in terminal_nodes}
 
-    import pdb; pdb.set_trace()
+    for node_a, node_b in combinations(terminal_nodes, 2):
+        if node_a not in share_roots:  # Already accounted for.
+            continue
+        overlap = tnr[node_a] & tnr[node_b]
+        if overlap:
+            share_roots.pop(node_b, None)
+            share_roots[node_a] |= {node_b}
 
-    return
+    partitioned_terminal_nodes = [{k, *v} for k, v in share_roots.items()]
+
+    subgraphs = []
+    for partition in partitioned_terminal_nodes:
+        sd = partition.copy()
+        for tn in partition:
+            sd |= tnd[tn]
+        subgraphs.append({k: dependencies[k] for k in sd})
+
+    return subgraphs
 
 
 class AutoRestrictor(SchedulerPlugin):
@@ -83,7 +113,7 @@ class AutoRestrictor(SchedulerPlugin):
         part_nodes = {k for (k, v) in dependents.items() if not v}
         root_nodes = {k for (k, v) in dependencies.items() if not v}
 
-        vertical_partition(part_nodes, root_nodes, dependencies)
+        subgraphs = vertical_partition(dependencies)
 
         # Figure out the depth of every task. Depth is defined as maximum
         # distance from a root node. TODO: Optimize get_node_depths.
